@@ -1,0 +1,140 @@
+# ===============================================
+# CÀI ĐẶT CÁC THƯ VIỆN CẦN THIẾT
+# ===============================================
+!pip install scikit-image
+
+import numpy as np
+import matplotlib.pyplot as plt
+from skimage.transform import radon, iradon
+from skimage.metrics import mean_squared_error
+from skimage.color import rgb2gray
+from skimage.util import img_as_float
+from google.colab import files
+from PIL import Image
+import io
+
+# ===============================================
+# BƯỚC 1: TẢI ẢNH VÀ XỬ LÝ
+# ===============================================
+print("Chọn file ảnh (.png, .bmp) từ máy tính...")
+uploaded = files.upload()
+
+file_name = list(uploaded.keys())[0]
+img_pil = Image.open(io.BytesIO(uploaded[file_name]))
+img = np.array(img_pil)
+
+# Xử lý ảnh màu, alpha
+if img.ndim == 3 and img.shape[2] == 4:
+    img = img[..., :3]
+if img.ndim == 3:
+    img = rgb2gray(img)
+img = img_as_float(img)
+
+# Cắt ảnh thành vuông
+h, w = img.shape
+side = min(h, w)
+start_h = (h - side) // 2
+start_w = (w - side) // 2
+img_square = img[start_h:start_h+side, start_w:start_w+side]
+
+plt.figure(figsize=(5, 5))
+plt.imshow(img_square, cmap='gray')
+plt.title("Ảnh gốc (Grayscale, vuông)")
+plt.axis('off')
+plt.show()
+
+# ===============================================
+# BƯỚC 2: TẠO SINOGRAM
+# ===============================================
+theta = np.linspace(0., 180., side, endpoint=False)
+sinogram = radon(img_square, theta=theta, circle=True)
+
+plt.figure(figsize=(6, 5))
+plt.imshow(sinogram, cmap='gray', aspect='auto')
+plt.title("Sinogram gốc (circle=True)")
+plt.xlabel("Góc chiếu (°)")
+plt.ylabel("Vị trí detector")
+plt.colorbar()
+plt.show()
+
+# ===============================================
+# BƯỚC 3: THUẬT TOÁN SIRT CẢI TIẾN
+# ===============================================
+def sirt_reconstruction(sinogram, angles, max_iter=100, min_iter=10, tolerance=1e-4, init_alpha=0.01):
+    """
+    Cải tiến:
+      - Giảm alpha từ từ khi cập nhật không giảm MSE
+      - Yêu cầu ít nhất `min_iter` vòng lặp trước khi dừng
+      - Clip giá trị âm về 0 để tránh ảnh giả
+    """
+    img_size = sinogram.shape[0]
+    reconstructed_img = np.zeros((img_size, img_size), dtype=np.float32)
+    error_list = []
+    alpha = init_alpha
+
+    for i in range(max_iter):
+        simulated_sinogram = radon(reconstructed_img, angles, circle=True)
+
+        if simulated_sinogram.shape != sinogram.shape:
+            raise ValueError(f"Kích thước sinogram không khớp: {simulated_sinogram.shape} vs {sinogram.shape}")
+
+        mse_current = mean_squared_error(simulated_sinogram, sinogram)
+        error_list.append(mse_current)
+        print(f"Iteration {i+1}, MSE before update: {mse_current:.6f}, alpha: {alpha:.6f}")
+
+        # Tính lỗi và back projection
+        error = sinogram - simulated_sinogram
+        back_projection = iradon(error, angles, circle=True, filter_name=None)
+
+        # Thử cập nhật ảnh
+        temp_recon = reconstructed_img + alpha * back_projection
+        temp_simulated = radon(temp_recon, angles, circle=True)
+        mse_new = mean_squared_error(temp_simulated, sinogram)
+
+        # Nếu MSE giảm, chấp nhận cập nhật
+        if mse_new < mse_current:
+            reconstructed_img = temp_recon
+            print(f"Iteration {i+1}, accepted update, new MSE: {mse_new:.6f}")
+        else:
+            alpha *= 0.9  # Giảm từ từ thay vì 0.5
+            print(f"Iteration {i+1}, update rejected, reducing alpha to {alpha:.6f}")
+
+        # Clip chỉ giá trị âm về 0
+        reconstructed_img = np.clip(reconstructed_img, 0, None)
+
+        # Kiểm tra hội tụ (chỉ dừng nếu đã qua min_iter vòng lặp)
+        if i >= min_iter and abs(error_list[-1] - error_list[-2]) < tolerance:
+            print("Converged at iteration", i+1)
+            break
+
+    return reconstructed_img, error_list
+
+# ===============================================
+# BƯỚC 4: CHẠY THUẬT TOÁN SIRT
+# ===============================================
+reconstructed_SIRT, mse_errors = sirt_reconstruction(
+    sinogram, theta, max_iter=1000, min_iter=10, tolerance=1e-5, init_alpha=0.01
+)
+
+# ===============================================
+# BƯỚC 5: TRỰC QUAN HÓA KẾT QUẢ
+# ===============================================
+plt.figure(figsize=(10, 5))
+plt.subplot(1, 2, 1)
+plt.imshow(img_square, cmap="gray")
+plt.title("Ảnh gốc (Đã crop vuông)")
+plt.axis("off")
+plt.subplot(1, 2, 2)
+plt.imshow(reconstructed_SIRT, cmap="gray")
+plt.title("Tái tạo bằng SIRT (Adaptive)")
+plt.axis("off")
+plt.show()
+
+plt.figure(figsize=(8, 5))
+plt.plot(mse_errors, label="MSE per iteration")
+plt.xlabel("Iteration")
+plt.ylabel("Mean Squared Error (MSE)")
+plt.title("Hội tụ của SIRT (Adaptive Update)")
+plt.legend()
+plt.grid(True)
+plt.show()
