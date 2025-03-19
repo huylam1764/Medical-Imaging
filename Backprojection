@@ -1,0 +1,116 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from skimage.transform import radon
+from skimage.color import rgb2gray
+from google.colab import files
+from PIL import Image
+import io
+
+# ----------------- Bước 1: Tải lên ảnh .bmp -----------------
+# Chạy đoạn này, chọn file ảnh .bmp từ máy tính của bạn
+uploaded = files.upload()
+
+# Lấy tên file đã tải lên (giả sử chỉ có 1 file)
+filename = list(uploaded.keys())[0]
+
+# Đọc ảnh sử dụng PIL và chuyển về numpy array
+img = Image.open(filename)
+image = np.array(img)
+
+# Nếu ảnh có nhiều kênh (RGB), chuyển sang grayscale
+if image.ndim == 3:
+    image = rgb2gray(image)
+
+# Đảm bảo ảnh có kiểu float
+image = image.astype(np.float64)
+
+# Nếu ảnh là 8-bit (giá trị từ 0-255), chuẩn hóa về [0, 1]
+if image.max() > 1:
+    image = image / 255.0
+
+# ----------------- Bổ sung: Áp dụng mặt nạ để đảm bảo ảnh = 0 ngoài reconstruction circle -----------------
+rows, cols = image.shape
+center = (rows / 2, cols / 2)
+radius_inscribed = min(center)  # bán kính của vòng tròn nội tiếp
+Y, X = np.ogrid[:rows, :cols]
+mask = (X - center[1])**2 + (Y - center[0])**2 <= radius_inscribed**2
+image_masked = np.zeros_like(image)
+image_masked[mask] = image[mask]
+
+# Hiển thị ảnh gốc đã tải lên và ảnh đã được mask
+plt.figure(figsize=(12,6))
+plt.subplot(1,2,1)
+plt.imshow(image, cmap='gray')
+plt.title("Ảnh gốc (.bmp)")
+plt.axis('off')
+
+plt.subplot(1,2,2)
+plt.imshow(image_masked, cmap='gray')
+plt.title("Ảnh sau khi mask (0 ngoài reconstruction circle)")
+plt.axis('off')
+plt.show()
+
+# ----------------- Bước 2: Tính Sinogram -----------------
+# Xác định các góc chiếu từ 0 đến 180 độ
+theta = np.linspace(0., 180., max(image_masked.shape), endpoint=False)
+sinogram = radon(image_masked, theta=theta, circle=True)
+
+# ----------------- Bước 3: Thực hiện Back Projection không lọc -----------------
+def back_projection(sinogram, theta, output_size):
+    """
+    Thực hiện Back Projection đơn giản (không dùng filter) từ sinogram.
+
+    Parameters:
+      sinogram: mảng numpy có kích thước (N, số góc), N là số pixel trên detector.
+      theta: mảng góc chiếu (đơn vị độ).
+      output_size: kích thước ảnh tái tạo (giả sử ảnh vuông).
+
+    Returns:
+      reconstruction: ảnh tái tạo có kích thước (output_size, output_size).
+    """
+    reconstruction = np.zeros((output_size, output_size))
+    n = sinogram.shape[0]  # số pixel trên detector
+
+    # Tạo lưới tọa độ cho ảnh tái tạo: khoảng [-output_size/2, output_size/2]
+    x = np.linspace(-output_size/2, output_size/2, output_size)
+    y = np.linspace(-output_size/2, output_size/2, output_size)
+    X, Y = np.meshgrid(x, y)
+
+    # Với mỗi góc chiếu, tính giá trị chiếu của mỗi pixel và cộng dồn giá trị nội suy từ sinogram
+    for i, angle in enumerate(theta):
+        rad_angle = np.deg2rad(angle)
+        t = X * np.cos(rad_angle) + Y * np.sin(rad_angle)
+        # Ánh xạ t về chỉ số trên detector (giả sử detector tọa độ [-n/2, n/2])
+        r = t + n/2
+
+        # Nội suy tuyến tính từ cột tương ứng của sinogram
+        sino_column = sinogram[:, i]
+        sino_interp = np.interp(r.flatten(), np.arange(n), sino_column, left=0, right=0)
+        sino_interp = sino_interp.reshape(output_size, output_size)
+
+        # Cộng dồn giá trị từ mỗi góc chiếu
+        reconstruction += sino_interp
+
+    # Chuẩn hóa kết quả (hệ số chuẩn thường là π/(2 * số góc))
+    reconstruction *= np.pi / (2 * len(theta))
+    return reconstruction
+
+output_size = min(image_masked.shape)
+recon_image = back_projection(sinogram, theta, output_size)
+
+# ----------------- Bước 4: Trực quan hóa kết quả -----------------
+plt.figure(figsize=(12,6))
+
+plt.subplot(1,2,1)
+plt.imshow(sinogram, cmap='gray', aspect='auto')
+plt.title("Sinogram (Grayscale)")
+plt.xlabel("Góc chiếu (°)")
+plt.ylabel("Vị trí chiếu (pixels)")
+
+plt.subplot(1,2,2)
+plt.imshow(recon_image, cmap='gray')
+plt.title("Ảnh tái tạo (Back Projection không filter)")
+plt.axis('off')
+
+plt.tight_layout()
+plt.show()
