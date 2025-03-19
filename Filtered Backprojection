@@ -1,0 +1,108 @@
+# Bước 0: Cài đặt thư viện (nếu cần)
+!pip install scikit-image
+
+import numpy as np
+import matplotlib.pyplot as plt
+from skimage import io, color
+from skimage.transform import radon
+from google.colab import files
+
+# ======================
+# Bước 1: Tải ảnh và chuyển sang grayscale
+# ======================
+uploaded = files.upload()  # Chọn file từ máy tính (.bmp hoặc .png)
+# Giả sử chỉ upload một file; nếu nhiều, ta có thể xử lý theo danh sách
+filename = list(uploaded.keys())[0]
+image = io.imread(filename)
+
+# Nếu ảnh có 3 kênh màu, chuyển sang grayscale
+if image.ndim == 3:
+    image_gray = color.rgb2gray(image)
+else:
+    image_gray = image
+
+plt.figure(figsize=(6, 6))
+plt.imshow(image_gray, cmap='gray')
+plt.title("Ảnh gốc (Grayscale)")
+plt.axis('off')
+plt.show()
+
+# ======================
+# Bước 2: Tạo sinogram sử dụng Radon transform
+# ======================
+# Tạo dãy góc từ 0 đến 180 độ (số lượng góc có thể lấy bằng max(size) của ảnh)
+theta = np.linspace(0., 180., max(image_gray.shape), endpoint=False)
+# Tính toán Radon transform (sinogram)
+sinogram = radon(image_gray, theta=theta, circle=True)
+
+plt.figure(figsize=(8, 6))
+plt.imshow(sinogram, cmap='gray', extent=(0, 180, 0, sinogram.shape[0]), aspect='auto')
+plt.title("Sinogram")
+plt.xlabel("Góc chiếu (độ)")
+plt.ylabel("Vị trí cảm biến")
+plt.colorbar()
+plt.show()
+
+# ======================
+# Bước 3: Lọc FBP
+# Các bước:
+# • Chuyển dữ liệu Projection sang miền Fourier (FFT)
+# • Áp dụng bộ lọc Ram-Lak (ramp filter)
+# • Chuyển lại về miền không gian (Inverse FFT)
+# • Thực hiện back projection
+# ======================
+
+# --- 3.1: Áp dụng FFT cho từng projection (theo chiều dọc của sinogram)
+num_detectors, num_angles = sinogram.shape
+
+# Tính tần số (frequency) theo số cảm biến (axis=0)
+freq = np.fft.fftfreq(num_detectors).reshape(-1, 1)
+# Bộ lọc Ram-Lak: ramp filter là giá trị tuyệt đối của tần số (nhân đôi nếu cần cân bằng)
+ramp_filter = 2 * np.abs(freq)
+
+# FFT cho sinogram theo chiều cảm biến (axis=0)
+sinogram_fft = np.fft.fft(sinogram, axis=0)
+# Áp dụng bộ lọc trên miền tần số
+filtered_fft = sinogram_fft * ramp_filter
+# Chuyển về miền không gian với Inverse FFT
+filtered_sinogram = np.real(np.fft.ifft(filtered_fft, axis=0))
+
+# --- 3.2: Back projection
+# Ta sẽ xây dựng lại ảnh từ các projection đã được lọc
+# Định nghĩa kích thước ảnh đầu ra: chọn kích thước bằng max(width, height) của ảnh gốc
+output_size = max(image_gray.shape)
+reconstruction = np.zeros((output_size, output_size))
+
+# Tạo lưới tọa độ (với tâm nằm ở giữa ảnh)
+x = np.arange(output_size) - output_size / 2
+y = np.arange(output_size) - output_size / 2
+X, Y = np.meshgrid(x, y)
+
+# Các vị trí cảm biến ban đầu được tính từ khoảng [-L/2, L/2]
+detector_coords = np.linspace(- (num_detectors - 1) / 2,
+                              (num_detectors - 1) / 2,
+                              num_detectors)
+
+# Lặp qua từng góc chiếu để cộng dồn back projection
+for i, angle in enumerate(theta):
+    # Chuyển đổi sang radian
+    rad = np.deg2rad(angle)
+    # Tính vị trí trên cảm biến ứng với mỗi điểm ảnh:
+    # Công thức: t = x*cos(theta) + y*sin(theta)
+    t = X * np.cos(rad) + Y * np.sin(rad)
+    # Nội suy giá trị từ projection đã lọc
+    # np.interp yêu cầu 1D arrays, do đó flatten lưới và sau đó reshape về kích thước ảnh
+    projection = np.interp(t.flatten(), detector_coords, filtered_sinogram[:, i], left=0, right=0)
+    reconstruction += projection.reshape(output_size, output_size)
+
+# Chuẩn hóa lại ảnh phục hồi theo bước góc
+reconstruction *= np.pi / (2 * len(theta))
+
+# ======================
+# Bước 4: Trực quan hóa kết quả phục hồi
+# ======================
+plt.figure(figsize=(6, 6))
+plt.imshow(reconstruction, cmap='gray')
+plt.title("Ảnh phục hồi (FBP)")
+plt.axis('off')
+plt.show()
